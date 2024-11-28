@@ -221,6 +221,20 @@ func convertToMP3(inputPath, outputPath string) error {
 	return cmd.Run()
 }
 
+func getTrackLength(filePath string) (float64, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("error getting track length: %w", err)
+	}
+	lengthStr := strings.TrimSpace(string(output))
+	length, err := strconv.ParseFloat(lengthStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("error parsing track length: %w", err)
+	}
+	return length, nil
+}
+
 func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 	for {
 		select {
@@ -242,13 +256,23 @@ func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 				continue
 			}
 
+			trackLength, err := getTrackLength(mp3FilePath)
+			if err != nil {
+				logger.Error("Failed to get track length: ", err)
+				continue
+			}
+			logger.Infof("Track length: %.2f seconds", trackLength)
+
 			if err := playFile(mp3FilePath); err != nil {
 				logger.Error("Failed to play file: ", err)
 				continue
 			}
 
 			if err := os.Remove(filePath); err != nil {
-				logger.Warn("Failed to delete file: ", err)
+				logger.Warn("Failed to delete original file: ", err)
+			}
+			if err := os.Remove(mp3FilePath); err != nil {
+				logger.Warn("Failed to delete MP3 file: ", err)
 			}
 		}
 	}
