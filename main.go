@@ -8,16 +8,22 @@ import (
 	"github.com/spf13/cobra"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-var MaxQueueSize = 50
+const (
+	MaxQueueSize    = 50
+	FetchInterval   = 5 * time.Second
+	AudioFolderPath = "OpenMHzPi-downloads"
+)
 
 type System struct {
 	Name        string  `json:"name"`
@@ -37,26 +43,17 @@ type SystemsResponse struct {
 }
 
 type Call struct {
-	ID           string `json:"_id"`
-	TalkgroupNum int    `json:"talkgroupNum"`
-	URL          string `json:"url"`
-	Filename     string `json:"filename"`
-	Time         string `json:"time"`
-	SrcList      []struct {
-		Pos float64 `json:"pos"`
-		Src string  `json:"src"`
-		ID  string  `json:"_id"`
-	} `json:"srcList"`
-	Star int `json:"star"`
-	Freq int `json:"freq"`
-	Len  int `json:"len"`
+	ID       string `json:"_id"`
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+	Time     string `json:"time"`
 }
 
 type CallsResponse struct {
 	Calls []Call `json:"calls"`
 }
 
-func initLogger() *logrus.Logger {
+func initLogger(debug bool) *logrus.Logger {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
 		ForceColors:   true,
@@ -64,54 +61,52 @@ func initLogger() *logrus.Logger {
 	})
 	logger.SetOutput(os.Stdout)
 	logger.SetLevel(logrus.InfoLevel)
+	if debug {
+		logger.SetLevel(logrus.DebugLevel)
+	}
 	return logger
 }
 
-func fetchSystems(logger *logrus.Logger) (string, error) {
-	logger.Debug("Fetching available systems...")
-
-	proxyURL, err := url.Parse("http://localhost:8191/v1")
-	if err != nil {
-		return "", fmt.Errorf("error parsing proxy URL: %w", err)
-	}
+func fetchJSON(logger *logrus.Logger, proxyURL, targetURL string) ([]byte, error) {
+	logger.Debugf("Fetching JSON via proxy. Target URL: %s", targetURL)
 
 	client := &http.Client{}
-	data := map[string]interface{}{
+
+	requestData := map[string]interface{}{
 		"cmd":        "request.get",
-		"url":        "https://api.openmhz.com/systems",
+		"url":        targetURL,
 		"maxTimeout": 60000,
 	}
 
-	jsonData, err := json.Marshal(data)
+	jsonData, err := json.Marshal(requestData)
 	if err != nil {
-		return "", fmt.Errorf("error marshalling JSON: %w", err)
+		return nil, fmt.Errorf("error marshalling request JSON: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", proxyURL.String(), bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", proxyURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", fmt.Errorf("error creating request: %w", err)
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error fetching systems: %w", err)
+		return nil, fmt.Errorf("error performing request: %w", err)
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			logger.Error("Error closing response body: ", err)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Warnf("Failed to close response body: %v", err)
 		}
-	}(resp.Body)
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch systems: status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("error reading response: %w", err)
+		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
 
 	htmlContent := string(body)
@@ -119,264 +114,216 @@ func fetchSystems(logger *logrus.Logger) (string, error) {
 	endIndex := strings.Index(htmlContent, "</pre>")
 
 	if startIndex == -1 || endIndex == -1 {
-		return "", fmt.Errorf("error: <pre> tags not found in response")
+		return nil, fmt.Errorf("failed to locate <pre> tags in response")
 	}
 
 	jsonStr := htmlContent[startIndex+len("<pre>") : endIndex]
 
 	unescapedJSON, err := strconv.Unquote(`"` + jsonStr + `"`)
 	if err != nil {
-		logger.Error("Error unescaping JSON: ", err)
-		logger.Error("Raw extracted JSON: ", jsonStr)
-		return "", fmt.Errorf("error unescaping JSON: %w", err)
+		logger.Errorf("Error unescaping JSON: %v", err)
+		logger.Errorf("Raw JSON: %s", jsonStr)
+		return nil, fmt.Errorf("error unescaping JSON: %w", err)
+	}
+
+	return []byte(unescapedJSON), nil
+}
+
+func fetchSystems(logger *logrus.Logger, proxyURL string) (string, error) {
+	body, err := fetchJSON(logger, proxyURL, "https://api.openmhz.com/systems")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch systems: %w", err)
 	}
 
 	var systemsResponse SystemsResponse
-	if err := json.Unmarshal([]byte(unescapedJSON), &systemsResponse); err != nil {
+	if err := json.Unmarshal(body, &systemsResponse); err != nil {
 		return "", fmt.Errorf("error parsing systems JSON: %w", err)
 	}
 
 	if !systemsResponse.Success {
-		return "", fmt.Errorf("failed to fetch systems: response indicates failure")
+		return "", fmt.Errorf("API response indicates failure")
 	}
 
 	logger.Info("Available systems:")
 	for _, system := range systemsResponse.Systems {
-		fmt.Printf("- %s: %s\n", system.Name, system.ShortName)
+		logger.Infof("- %s (%s)", system.Name, system.ShortName)
 	}
 
 	fmt.Print("Enter the shortName of the system you want to use: ")
 	var shortName string
-	_, err = fmt.Scanln(&shortName)
-	if err != nil {
-		return "", err
+	if _, err := fmt.Scanln(&shortName); err != nil {
+		return "", fmt.Errorf("error reading user input: %w", err)
 	}
 
 	return shortName, nil
 }
 
-func fetchCalls(logger *logrus.Logger, systemShortName string, queue chan Call, processedCalls *sync.Map) {
-	logger.Debugf("Fetching calls for system: %s", systemShortName)
-	urlStr := fmt.Sprintf("https://api.openmhz.com/%s/calls", systemShortName)
+func fetchCalls(logger *logrus.Logger, proxyURL, systemShortName string, queue chan Call, processedCalls *sync.Map, done <-chan struct{}) {
+	apiURL := fmt.Sprintf("https://api.openmhz.com/%s/calls", systemShortName)
+	logger.Debugf("API URL: %s", apiURL)
 
-	proxyURL, err := url.Parse("http://localhost:8191/v1")
-	if err != nil {
-		logger.Error("Error parsing proxy URL: ", err)
-		return
-	}
+	isFirstRun := true
 
-	client := &http.Client{}
-
-	firstRun := true
 	for {
-		time.Sleep(5 * time.Second)
-		data := map[string]interface{}{
-			"cmd":        "request.get",
-			"url":        urlStr,
-			"maxTimeout": 60000,
-		}
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			logger.Error("Error marshalling JSON: ", err)
-			continue
-		}
-
-		req, err := http.NewRequest("POST", proxyURL.String(), bytes.NewBuffer(jsonData))
-		if err != nil {
-			logger.Error("Error creating request: ", err)
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			logger.Error("Error fetching calls: ", err)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			logger.Error("Error fetching calls: status code ", resp.StatusCode)
-			continue
-		}
-
-		body, _ := io.ReadAll(resp.Body)
-		err = resp.Body.Close()
-		if err != nil {
-			logger.Error("Error closing response body: ", err)
-			continue
-		}
-
-		htmlContent := string(body)
-		startIndex := strings.Index(htmlContent, "<pre>")
-		endIndex := strings.Index(htmlContent, "</pre>")
-
-		if startIndex != -1 && endIndex != -1 {
-			jsonStr := htmlContent[startIndex+len("<pre>") : endIndex]
-
-			unescapedJSON, err := strconv.Unquote(`"` + jsonStr + `"`)
+		select {
+		case <-done:
+			logger.Info("Stopping call fetcher.")
+			return
+		case <-time.After(FetchInterval):
+			logger.Debug("Fetching calls...")
+			body, err := fetchJSON(logger, proxyURL, apiURL)
 			if err != nil {
-				logger.Error("Error unescaping JSON: ", err)
-				logger.Error("Raw extracted JSON: ", jsonStr)
+				logger.Error("Error fetching calls: ", err)
 				continue
 			}
 
-			var response CallsResponse
-			if err := json.Unmarshal([]byte(unescapedJSON), &response); err != nil {
-				logger.Error("Error parsing unescaped JSON: ", err)
-				logger.Error("Unescaped JSON: ", unescapedJSON)
+			logger.Debugf("Fetched calls JSON: %s", string(body))
+			var callsResponse CallsResponse
+			if err := json.Unmarshal(body, &callsResponse); err != nil {
+				logger.Error("Error parsing calls JSON: ", err)
 				continue
 			}
 
-			var callsToAdd []Call
-			for _, call := range response.Calls {
-				if _, exists := processedCalls.Load(call.ID); exists {
-					continue
-				}
-				if firstRun {
+			logger.Debugf("Parsed %d calls", len(callsResponse.Calls))
+
+			for _, call := range callsResponse.Calls {
+				logger.Debugf("Processing call ID: %s", call.ID)
+
+				if isFirstRun {
 					processedCalls.Store(call.ID, true)
+					logger.Infof("Marked call ID %s as processed (initial run)", call.ID)
 					continue
 				}
 
-				logger.Debug("New call detected, adding to processed calls: ", call.Filename)
-				processedCalls.Store(call.ID, true)
-				callsToAdd = append(callsToAdd, call)
-			}
-
-			for i := len(callsToAdd) - 1; i >= 0; i-- {
-				select {
-				case queue <- callsToAdd[i]:
-					logger.Info("Call added to queue: ", callsToAdd[i].ID)
-				default:
-					logger.Warn("Queue is full, removing oldest call to add new one: ", callsToAdd[i].Filename)
-					<-queue
-					queue <- callsToAdd[i]
+				if _, exists := processedCalls.LoadOrStore(call.ID, true); !exists {
+					select {
+					case queue <- call:
+						logger.Infof("New call added to queue: %s", call.Filename)
+					default:
+						logger.Warn("Queue full, dropping oldest call.")
+						<-queue
+						queue <- call
+					}
+				} else {
+					logger.Debugf("Call ID %s already processed", call.ID)
 				}
 			}
-			logger.Infof("Fetched %d new calls, %d/%d items in queue", len(callsToAdd), len(queue), MaxQueueSize)
-			firstRun = false
-		} else {
-			logger.Error("Error: <pre> tags not found in response.")
+
+			if isFirstRun {
+				isFirstRun = false
+			}
 		}
 	}
 }
 
-func playAudio(logger *logrus.Logger, queue <-chan Call) {
-	for call := range queue {
-		logger.Info("Processing audio: ", call.Filename)
+func convertToMP3(inputPath, outputPath string) error {
+	cmd := exec.Command("ffmpeg", "-i", inputPath, outputPath)
+	return cmd.Run()
+}
 
-		m4aPath := "OpenMHzPi-downloads/" + strings.Split(call.Filename, "/")[len(strings.Split(call.Filename, "/"))-1]
-		mp3Path := strings.Replace(m4aPath, ".m4a", ".mp3", 1)
+func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
+	for {
+		select {
+		case <-done:
+			logger.Info("Stopping audio player.")
+			return
+		case call := <-queue:
+			logger.Infof("Processing call: %s", call.Filename)
 
-		logger.Debug("Downloading audio from URL: ", call.URL)
-		err := downloadFile(call.URL, m4aPath)
-		if err != nil {
-			logger.Error("Error downloading file: ", err)
-			continue
+			filePath := fmt.Sprintf("%s/%s", AudioFolderPath, filepath.Base(call.Filename))
+			if err := downloadFile(call.URL, filePath); err != nil {
+				logger.Error("Failed to download file: ", err)
+				continue
+			}
+
+			mp3FilePath := strings.TrimSuffix(filePath, filepath.Ext(filePath)) + ".mp3"
+			if err := convertToMP3(filePath, mp3FilePath); err != nil {
+				logger.Error("Failed to convert file to MP3: ", err)
+				continue
+			}
+
+			if err := playFile(mp3FilePath); err != nil {
+				logger.Error("Failed to play file: ", err)
+				continue
+			}
+
+			if err := os.Remove(filePath); err != nil {
+				logger.Warn("Failed to delete file: ", err)
+			}
 		}
-
-		logger.Debug("Converting audio to MP3: ", mp3Path)
-		convertCmd := exec.Command("ffmpeg", "-i", m4aPath, mp3Path, "-y")
-		err = convertCmd.Run()
-		if err != nil {
-			logger.Error("Error converting to MP3: ", err)
-			continue
-		}
-
-		logger.Debug("Playing MP3 file: ", mp3Path)
-		playCmd := exec.Command("mpg123", mp3Path)
-		err = playCmd.Run()
-		if err != nil {
-			logger.Error("Error playing audio: ", err)
-			continue
-		}
-
-		logger.Debug("Cleaning up files.")
-		err = os.Remove(m4aPath)
-		if err != nil {
-			logger.Error("Error deleting M4A file: ", err)
-		}
-		err = os.Remove(mp3Path)
-		if err != nil {
-			logger.Error("Error deleting MP3 file: ", err)
-		}
-
-		logger.Infof("Completed processing: %s, %d/%d items left in queue", call.Filename, len(queue), MaxQueueSize)
 	}
 }
 
 func downloadFile(url, filepath string) error {
-	out, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer func(out *os.File) {
-		_ = out.Close()
-	}(out)
-
 	resp, err := http.Get(url)
 	if err != nil {
-		return err
+		return fmt.Errorf("error downloading file: %w", err)
 	}
-	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
-	}(resp.Body)
+	defer resp.Body.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	out, err := os.Create(filepath)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return fmt.Errorf("error writing file: %w", err)
 	}
 
 	return nil
 }
 
+func playFile(filepath string) error {
+	cmd := exec.Command("mpg123", filepath)
+	return cmd.Run()
+}
+
 func main() {
-	logger := initLogger()
-
-	err := os.RemoveAll("OpenMHzPi-downloads")
-	if err != nil {
-		logger.Error("Error deleting OpenMHzPi-downloads directory: ", err)
-		return
-	}
-	err = os.MkdirAll("OpenMHzPi-downloads", os.ModePerm)
-	if err != nil {
-		logger.Error("Error creating OpenMHzPi-downloads directory: ", err)
-		return
-	}
-
-	rootCmd := &cobra.Command{Use: "app"}
 	var shortName string
 	var debug bool
+
+	rootCmd := &cobra.Command{
+		Use: "app",
+		Run: func(cmd *cobra.Command, args []string) {
+			logger := initLogger(debug)
+
+			if err := os.MkdirAll(AudioFolderPath, os.ModePerm); err != nil {
+				logger.Fatal("Failed to create audio directory: ", err)
+			}
+
+			proxyURL := "http://localhost:8191/v1"
+
+			if shortName == "" {
+				var err error
+				shortName, err = fetchSystems(logger, proxyURL)
+				if err != nil {
+					logger.Fatal(err)
+				}
+			}
+
+			queue := make(chan Call, MaxQueueSize)
+			processedCalls := &sync.Map{}
+			done := make(chan struct{})
+
+			go fetchCalls(logger, proxyURL, shortName, queue, processedCalls, done)
+			go playAudio(logger, queue, done)
+
+			c := make(chan os.Signal, 1)
+			signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+			<-c
+
+			logger.Info("Shutting down...")
+			close(done)
+			time.Sleep(2 * time.Second)
+		},
+	}
 
 	rootCmd.PersistentFlags().StringVar(&shortName, "shortname", "", "Short name of the system")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug mode")
 
-	rootCmd.Run = func(cmd *cobra.Command, args []string) {
-		if debug {
-			logger.SetLevel(logrus.DebugLevel)
-			logger.Info("Debug mode enabled")
-		}
-
-		if shortName == "" {
-			shortName, err = fetchSystems(logger)
-			if err != nil {
-				logger.Fatal("Failed to select a system: ", err)
-				return
-			}
-		} else {
-			logger.Infof("Using provided system shortname: %s", shortName)
-		}
-
-		queue := make(chan Call, MaxQueueSize)
-		processedCalls := &sync.Map{}
-
-		go fetchCalls(logger, shortName, queue, processedCalls)
-		go playAudio(logger, queue)
-
-		select {}
-	}
-
 	if err := rootCmd.Execute(); err != nil {
-		logger.Fatal(err)
+		fmt.Println("Error:", err)
+		os.Exit(1)
 	}
 }
