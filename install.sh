@@ -34,7 +34,7 @@ else
 fi
 
 echo "Downloading the latest binary..."
-wget -O /usr/bin/openmhzpi https://github.com/alessiodam/OpenMHzPi/releases/latest/download/openmhzpi-linux-$(uname -m)
+wget -O /usr/bin/openmhzpi https://github.com/alessiodam/OpenMHzPi/releases/latest/download/openmhzpi-linux-arm64
 
 echo "Making the binary executable..."
 chmod +x /usr/bin/openmhzpi
