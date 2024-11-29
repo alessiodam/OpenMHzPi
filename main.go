@@ -223,7 +223,7 @@ func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 		case call := <-queue:
 			logger.Infof("Processing call: %s", call.ID)
 
-			err := playWalkieTalkieBeep()
+			err := playRogerBeep()
 			if err != nil {
 				logger.Error("Failed to play walkie-talkie beep: ", err)
 				continue
@@ -237,7 +237,7 @@ func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 	}
 }
 
-func playWalkieTalkieBeep() error {
+func playRogerBeep() error {
 	cmd := exec.Command("ffplay", "-autoexit", "-nodisp", "-f", "lavfi",
 		"-i", "sine=frequency=1000:duration=0.2 [s0]; sine=frequency=1500:duration=0.2 [s1]; [s0][s1]concat=n=2:v=0:a=1 [out0]")
 	return cmd.Run()
