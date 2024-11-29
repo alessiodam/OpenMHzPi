@@ -303,6 +303,15 @@ func playFile(filepath string) error {
 	return cmd.Run()
 }
 
+func isFlareSolverrRunning() bool {
+	resp, err := http.Get("http://localhost:8191/")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 func main() {
 	var shortName string
 	var debug bool
@@ -317,6 +326,10 @@ func main() {
 			}
 
 			proxyURL := "http://localhost:8191/v1"
+
+			if !isFlareSolverrRunning() {
+				logger.Fatal("FlareSolverr is not running. Please start it before running this application.")
+			}
 
 			if shortName == "" {
 				var err error
