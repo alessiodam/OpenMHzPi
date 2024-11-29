@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/cheggaaa/pb/v3"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"io"
@@ -198,7 +199,7 @@ func fetchCalls(logger *logrus.Logger, proxyURL, systemShortName string, queue c
 				if _, exists := processedCalls.LoadOrStore(call.ID, true); !exists {
 					select {
 					case queue <- call:
-						logger.Infof("New call added to queue: %s", call.Filename)
+						logger.Infof("New call added to queue: %s", call.ID)
 					default:
 						logger.Warn("Queue full, dropping oldest call.")
 						<-queue
@@ -291,7 +292,11 @@ func downloadFile(url, filepath string) error {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	bar := pb.Full.Start64(resp.ContentLength)
+	barReader := bar.NewProxyReader(resp.Body)
+	defer bar.Finish()
+
+	if _, err := io.Copy(out, barReader); err != nil {
 		return fmt.Errorf("error writing file: %w", err)
 	}
 
@@ -321,6 +326,9 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			logger := initLogger(debug)
 
+			if err := os.RemoveAll(AudioFolderPath); err != nil {
+				logger.Fatal("Failed to remove existing audio directory: ", err)
+			}
 			if err := os.MkdirAll(AudioFolderPath, os.ModePerm); err != nil {
 				logger.Fatal("Failed to create audio directory: ", err)
 			}
