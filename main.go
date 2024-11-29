@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/cheggaaa/pb/v3"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,25 +215,6 @@ func fetchCalls(logger *logrus.Logger, proxyURL, systemShortName string, queue c
 	}
 }
 
-func convertToMP3(inputPath, outputPath string) error {
-	cmd := exec.Command("ffmpeg", "-i", inputPath, outputPath)
-	return cmd.Run()
-}
-
-func getTrackLength(filePath string) (float64, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath)
-	output, err := cmd.Output()
-	if err != nil {
-		return 0, fmt.Errorf("error getting track length: %w", err)
-	}
-	lengthStr := strings.TrimSpace(string(output))
-	length, err := strconv.ParseFloat(lengthStr, 64)
-	if err != nil {
-		return 0, fmt.Errorf("error parsing track length: %w", err)
-	}
-	return length, nil
-}
-
 func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 	for {
 		select {
@@ -243,68 +222,18 @@ func playAudio(logger *logrus.Logger, queue <-chan Call, done <-chan struct{}) {
 			logger.Info("Stopping audio player.")
 			return
 		case call := <-queue:
-			logger.Infof("Processing call: %s", call.Filename)
+			logger.Infof("Processing call: %s", call.ID)
 
-			filePath := fmt.Sprintf("%s/%s", AudioFolderPath, filepath.Base(call.Filename))
-			if err := downloadFile(call.URL, filePath); err != nil {
-				logger.Error("Failed to download file: ", err)
-				continue
-			}
-
-			mp3FilePath := strings.TrimSuffix(filePath, filepath.Ext(filePath)) + ".mp3"
-			if err := convertToMP3(filePath, mp3FilePath); err != nil {
-				logger.Error("Failed to convert file to MP3: ", err)
-				continue
-			}
-
-			trackLength, err := getTrackLength(mp3FilePath)
-			if err != nil {
-				logger.Error("Failed to get track length: ", err)
-				continue
-			}
-			logger.Infof("Track length: %.2f seconds", trackLength)
-
-			if err := playFile(mp3FilePath); err != nil {
+			if err := playFile(call.URL); err != nil {
 				logger.Error("Failed to play file: ", err)
 				continue
-			}
-
-			if err := os.Remove(filePath); err != nil {
-				logger.Warn("Failed to delete original file: ", err)
-			}
-			if err := os.Remove(mp3FilePath); err != nil {
-				logger.Warn("Failed to delete MP3 file: ", err)
 			}
 		}
 	}
 }
 
-func downloadFile(url, filepath string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return fmt.Errorf("error downloading file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	out, err := os.Create(filepath)
-	if err != nil {
-		return fmt.Errorf("error creating file: %w", err)
-	}
-	defer out.Close()
-
-	bar := pb.Full.Start64(resp.ContentLength)
-	barReader := bar.NewProxyReader(resp.Body)
-	defer bar.Finish()
-
-	if _, err := io.Copy(out, barReader); err != nil {
-		return fmt.Errorf("error writing file: %w", err)
-	}
-
-	return nil
-}
-
-func playFile(filepath string) error {
-	cmd := exec.Command("mpg123", filepath)
+func playFile(url string) error {
+	cmd := exec.Command("ffplay", "-autoexit", "-nodisp", url)
 	return cmd.Run()
 }
 
@@ -325,13 +254,6 @@ func main() {
 		Use: "app",
 		Run: func(cmd *cobra.Command, args []string) {
 			logger := initLogger(debug)
-
-			if err := os.RemoveAll(AudioFolderPath); err != nil {
-				logger.Fatal("Failed to remove existing audio directory: ", err)
-			}
-			if err := os.MkdirAll(AudioFolderPath, os.ModePerm); err != nil {
-				logger.Fatal("Failed to create audio directory: ", err)
-			}
 
 			proxyURL := "http://localhost:8191/v1"
 
