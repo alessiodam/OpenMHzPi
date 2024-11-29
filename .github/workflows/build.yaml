@@ -19,7 +19,7 @@ jobs:
 
       - name: Build Binaries
         run: |
-          GOARCH=arm64 GOOS=linux go build -o openmhzpi
+          GOARCH=arm64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
