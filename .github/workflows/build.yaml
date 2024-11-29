@@ -21,7 +21,6 @@ jobs:
         run: |
           GOARCH=amd64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi-linux-amd64
           GOARCH=arm64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi-linux-arm64
-          GOARCH=aarch64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi-linux-aarch64
           GOARCH=amd64 GOOS=windows go build -ldflags '-extldflags "-static"' -o openmhzpi-windows-amd64.exe
 
       - name: Upload Release Asset
@@ -30,5 +29,4 @@ jobs:
           files: |
             ./openmhzpi-linux-amd64
             ./openmhzpi-linux-arm64
-            ./openmhzpi-linux-aarch64
             ./openmhzpi-windows-amd64.exe
