@@ -80,7 +80,9 @@ func createFlareSolverrSession(proxyURL string) error {
 	if err != nil {
 		return fmt.Errorf("error creating session: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
