@@ -19,9 +19,14 @@ jobs:
 
       - name: Build Binaries
         run: |
-          GOARCH=arm64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi
+          GOARCH=amd64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi-linux-amd64
+          GOARCH=arm64 GOOS=linux go build -ldflags '-extldflags "-static"' -o openmhzpi-linux-arm64
+          GOARCH=amd64 GOOS=windows go build -ldflags '-extldflags "-static"' -o openmhzpi-windows-amd64.exe
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: ./openmhzpi
+          files: |
+            ./openmhzpi-linux-amd64
+            ./openmhzpi-linux-arm64
+            ./openmhzpi-windows-amd64.exe
