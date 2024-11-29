@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	MaxQueueSize  = 50
+	MaxQueueSize  = 10
 	FetchInterval = 5 * time.Second
 )
 
