@@ -65,6 +65,50 @@ func initLogger(debug bool) *logrus.Logger {
 	return logger
 }
 
+func createFlareSolverrSession(proxyURL string) error {
+	requestData := map[string]interface{}{
+		"cmd":     "sessions.create",
+		"session": "openmhzpi",
+	}
+
+	jsonData, err := json.Marshal(requestData)
+	if err != nil {
+		return fmt.Errorf("error marshalling request JSON: %w", err)
+	}
+
+	resp, err := http.Post(proxyURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating session: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %w", err)
+	}
+
+	var response map[string]interface{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("error unmarshalling response JSON: %w", err)
+	}
+
+	status, statusOk := response["status"].(string)
+	message, messageOk := response["message"].(string)
+	if !statusOk || !messageOk {
+		return fmt.Errorf("response does not contain expected fields: %v", response)
+	}
+
+	if status != "ok" {
+		return fmt.Errorf("unexpected status: %s, message: %s", status, message)
+	}
+	if message != "Session already exists." && message != "Session created successfully." {
+		return fmt.Errorf("unexpected message: %s", message)
+	}
+
+	fmt.Println(string(body))
+	return nil
+}
+
 func fetchJSON(logger *logrus.Logger, proxyURL, targetURL string) ([]byte, error) {
 	logger.Debugf("Fetching JSON via proxy. Target URL: %s", targetURL)
 
@@ -72,6 +116,7 @@ func fetchJSON(logger *logrus.Logger, proxyURL, targetURL string) ([]byte, error
 
 	requestData := map[string]interface{}{
 		"cmd":        "request.get",
+		"session":    "openmhzpi",
 		"url":        targetURL,
 		"maxTimeout": 60000,
 	}
@@ -272,6 +317,11 @@ func main() {
 
 			if !isFlareSolverrRunning() {
 				logger.Fatal("FlareSolverr is not running. Please start it before running this application.")
+			}
+
+			err := createFlareSolverrSession(proxyURL)
+			if err != nil {
+				logger.Fatalf("Failed to create FlareSolverr session: %v", err)
 			}
 
 			if shortName == "" {
